@@ -14,11 +14,13 @@ the response carries status="withdrawn" (vector=null) as the
 index-withdrawal marker.
 """
 
+import math
 import threading
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
+from .locate import LocateSnapshot, LocateResult, locate_segment
 from .segment_tree import DIM, VisibleSoftmaxTree
 
 MAX_SHOTS = 100_000
@@ -58,6 +60,32 @@ class VectorResponse(BaseModel):
     visible_count: int
     status: str  # "ok" | "withdrawn"
     vector: list[float] | None
+
+
+class LocateRequest(BaseModel):
+    query: list[float] = Field(min_length=DIM, max_length=DIM)
+    ratio: float = Field(gt=0.0, le=1.0)
+
+    @field_validator("query")
+    @classmethod
+    def _query_finite(cls, v):
+        for x in v:
+            if not math.isfinite(x):
+                raise ValueError("query dimensions must be finite numbers")
+        return v
+
+
+class LocateResponse(BaseModel):
+    video_id: str
+    shot_count: int
+    visible_count: int
+    status: str  # "ok" | "no_positive_contribution" | "no_qualifying_interval"
+    ratio: float
+    positive_total: float
+    start: int | None
+    end: int | None
+    achieved_ratio: float | None
+    message: str
 
 
 # ----------------------------------------------------------------- state
@@ -154,3 +182,41 @@ def revoke_restriction(video_id: str, order_id: str):
 def get_retrieval_vector(video_id: str):
     with _LOCK:
         return _response(video_id, _get_state(video_id))
+
+
+@app.post("/videos/{video_id}/locate", response_model=LocateResponse)
+def locate(video_id: str, req: LocateRequest):
+    """Locate the shortest contiguous playable segment reaching
+    `ratio` of the video-wide positive contribution to `query`.
+
+    The snapshot (shots + currently effective orders) is taken at entry;
+    register/revoke calls landing during the O(N) scan do not change the
+    result of this call and are not blocked by it.
+    """
+    with _LOCK:
+        st = _get_state(video_id)
+        tree = st.tree
+        root_max, root_sum = tree.root_softmax()
+        snap = LocateSnapshot(
+            n=tree.n,
+            scores=tree.scores,
+            features=tree.features,
+            root_max=root_max,
+            root_sum=root_sum,
+            visible_count=tree.visible_count(),
+            orders=tuple(st.orders.values()),
+        )
+    # O(N + K) computation on the immutable snapshot, outside the lock
+    result: LocateResult = locate_segment(snap, req.query, req.ratio)
+    return LocateResponse(
+        video_id=video_id,
+        shot_count=snap.n,
+        visible_count=result.visible_count,
+        status=result.status,
+        ratio=req.ratio,
+        positive_total=result.positive_total,
+        start=result.start,
+        end=result.end,
+        achieved_ratio=result.achieved_ratio,
+        message=result.message,
+    )

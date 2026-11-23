@@ -153,6 +153,15 @@ class VisibleSoftmaxTree:
     def visible_count(self):
         return self.cnt[1]
 
+    def root_softmax(self):
+        """(max visible score, sum of exp(score - max)) over visible shots.
+
+        Used by the locate API to derive the same per-shot softmax weights
+        the retrieval vector is built from.  Returns (-inf, 0.0) when no
+        shot is visible.
+        """
+        return self.maxs[1], self.sums[1]
+
     def retrieval_vector(self):
         """Softmax-weighted feature sum over visible shots, or None if all hidden."""
         if self.cnt[1] == 0:
